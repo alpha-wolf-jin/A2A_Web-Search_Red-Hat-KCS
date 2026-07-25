@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Web Chatbot</title>
+    <style>
+        body {
+            //font-family: Arial, sans-serif;
+	    font-family: 'Courier New', Courier, monospace;
+            max-width: 1360px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+	    word-wrap: break-word;
+        }
+        .chat-container {
+            background-color: white;
+            border-radius: 10px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+            padding: 20px;
+            height: 810px;
+            overflow-y: auto;
+        }
+        .chat-message {
+            margin-bottom: 15px;
+            padding: 10px;
+            border-radius: 5px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+        .user-message {
+            background-color: #e3f2fd;
+            text-align: left;
+        }
+        .bot-message {
+            background-color: #f1f1f1;
+        }
+        #chat-form {
+            display: flex;
+            margin-top: 20px;
+        }
+        #user-input {
+            flex-grow: 1;
+            padding: 10px;
+            border-radius: 5px;
+            border: 1px solid #ddd;
+        }
+        button {
+            padding: 10px 20px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            margin-left: 10px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        .title {
+            text-align: center;
+            color: #333;
+        }
+    </style>
+</head>
+<body>
+    <h1 class="title">Web Search Chatbot</h1>
+    <div class="chat-container" id="chat-box">
+        <!-- Chat messages will appear here -->
+    </div>
+    <form id="chat-form">
+        <textarea id="user-input" placeholder="Type your message here..." required rows="4"></textarea>
+        <button type="submit">Send</button>
+    </form>
+
+    <script>
+        document.getElementById('chat-form').addEventListener('submit', function(e) {
+            e.preventDefault();
+            const userInput = document.getElementById('user-input');
+            const message = userInput.value.trim();
+            
+            if (message.toLowerCase() === 'quit') {
+                window.location.reload();
+                return;
+            }
+            
+            if (message) {
+                addMessage('You:\n' + message, 'user-message');
+
+                // Clear input
+                userInput.value = '';
+                
+        
+                // Create URLSearchParams to properly handle the encoding
+                const formData = new URLSearchParams();
+                formData.append('user_input', message);
+
+                fetch('/chat', {  // Remove the hardcoded URL and just use '/chat'
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: formData
+                })
+
+                .then(response => response.json())
+                .then(data => {
+                    addMessage('Bot:\n' + data.response, 'bot-message');
+                })
+                .catch(error => {
+                    addMessage('Error: ' + error, 'bot-message');
+                });
+            }
+        });
+        
+        function addMessage(text, className) {
+            const chatBox = document.getElementById('chat-box');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = 'chat-message ' + className;
+            messageDiv.textContent = text;
+            chatBox.appendChild(messageDiv);
+            chatBox.scrollTop = chatBox.scrollHeight;
+        }
+    </script>
+</body>
+</html>

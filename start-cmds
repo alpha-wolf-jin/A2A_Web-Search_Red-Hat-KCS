@@ -1,0 +1,31 @@
+
+uv add langchain_deepseek
+
+./web-search-agent-deepseek.py 
+
+
+./a2a_web_server.py -v
+
+
+./a2a_web_client.py --prompt "The cheat one round air ticket from Singapore to Wuhan China in June. Please provide the URL for the cheap price ticket booking."
+
+uv run web_UI.py
+
+----------------------------------
+./redhat-kcs-agent-deepseek.py --host 0.0.0.0 --port 8081
+
+
+./a2a_web_server.py --research-port 8081
+
+uv run web_UI.py
+
+-------------------------------------
+
+Version 2
+-------------------------------------
+./web-search-agent-deepseek.py --port 8080
+./redhat-kcs-agent-deepseek.py --port 8081
+./a2a_web_server.py --concierge-port 9996 -v
+
+uv run web_UI.py
+-------------------------------------

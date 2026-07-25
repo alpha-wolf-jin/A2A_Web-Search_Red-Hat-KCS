@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""A2A server for the Healthcare Concierge (DeepSeek).
+
+Builds the same concierge orchestrator as l10.py but exposes it as a
+long-running A2A server so other agents or clients can call it via
+the A2A protocol.
+
+Prerequisites:
+    - Policy Agent running   on POLICY_AGENT_PORT
+    - Research Agent running on RESEARCH_AGENT_PORT
+    - Provider Agent running on PROVIDER_AGENT_PORT
+
+Usage:
+    python L10/a2a_healthcare_agent.py
+    python L10/a2a_healthcare_agent.py --concierge-port 9996
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+
+from beeai_framework.adapters.a2a.serve.server import A2AServer, A2AServerConfig
+from beeai_framework.serve.utils import LRUMemoryManager
+from dotenv import load_dotenv
+
+from web_util import build_concierge
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    load_dotenv()
+    parser = argparse.ArgumentParser(description="A2A Healthcare Concierge server (DeepSeek)")
+    parser.add_argument("--host", default=os.environ.get("AGENT_HOST", "localhost"))
+    parser.add_argument("--research-port", default=os.environ.get("WEB_SEARCH_AGENT_PORT", "8080"))
+    parser.add_argument(
+        "--concierge-port",
+        type=int,
+        default=int(os.environ.get("Concierge_AGENT_PORT", "9996")),
+    )
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="Print trajectory events to the console")
+    return parser.parse_args(argv)
+
+
+def main() -> None:
+    args = parse_args()
+
+    concierge = build_concierge(
+        args.host, args.research_port,
+        verbose=args.verbose,
+    )
+
+    print(f"Serving WEb Search Concierge A2A on {args.host}:{args.concierge_port}")
+    try:
+        A2AServer(
+            config=A2AServerConfig(
+                port=args.concierge_port,
+                protocol="jsonrpc",
+                host=args.host,
+            ),
+            memory_manager=LRUMemoryManager(maxsize=100),
+        ).register(concierge, send_trajectory=True).serve()
+    except KeyboardInterrupt:
+        sys.exit(130)
+
+
+if __name__ == "__main__":
+    main()

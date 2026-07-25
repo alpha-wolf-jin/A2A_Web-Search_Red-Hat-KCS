@@ -113,50 +113,6 @@ class ConciseTrajectoryMiddleware(GlobalTrajectoryMiddleware):
         return ""
 
 
-# BeeAI + LiteLLM use tool calls with a ``tool_choice`` the DeepSeek API accepts on the
-# *non-thinking* (chat) path. DeepSeek V4 defaults to thinking mode, which in OpenAI
-# compatibility is handled like the legacy "reasoner" line and can return
-# "deepseek-reasoner does not support this tool_choice" — see
-# https://api-docs.deepseek.com/guides/thinking_mode
-# We therefore turn thinking off for the orchestrator only (``extra_body``), via
-# ``CONCIERGE_DEEPSEEK_THINKING=disabled`` (default). Set to ``enabled`` to experiment
-# (expect failures while tools + forced tool_choice are in use).
-_CONCIERGE_INCOMPATIBLE_MODELS = frozenset({"deepseek-reasoner"})
-#_CONCIERGE_DEFAULT_MODEL = "deepseek-v4-flash"
-_CONCIERGE_DEFAULT_MODEL = "deepseek-v4-pro"
-
-
-def _concierge_litellm_settings() -> dict[str, Any]:
-    """Provider kwargs passed through to LiteLLM/DeepSeek (V4 thinking toggle)."""
-    mode = (os.environ.get("CONCIERGE_DEEPSEEK_THINKING", "disabled") or "disabled").strip().lower()
-    if mode in ("0", "false", "off", "no", "disabled"):
-        t = "disabled"
-    elif mode in ("1", "true", "on", "yes", "enabled"):
-        t = "enabled"
-    else:
-        t = "disabled"
-    return {"extra_body": {"thinking": {"type": t}}}
-
-
-def _concierge_llm_model_id() -> str:
-    """Model for the research concierge (Think + handoff tools)."""
-    override = (os.environ.get("CONCIERGE_DEEPSEEK_MODEL") or "").strip()
-    if override:
-        return override
-    base = (os.environ.get("DEEPSEEK_MODEL") or _CONCIERGE_DEFAULT_MODEL).strip()
-    if not base:
-        base = _CONCIERGE_DEFAULT_MODEL
-    if base in _CONCIERGE_INCOMPATIBLE_MODELS:
-        print(
-            f"  ! Concierge: DEEPSEEK_MODEL={base!r} is incompatible with orchestrator tool "
-            f"calling; using {_CONCIERGE_DEFAULT_MODEL!r} instead. Set CONCIERGE_DEEPSEEK_MODEL "
-            "to pick another model, or use deepseek-v4-flash / deepseek-v4-pro for the concierge.",
-            file=sys.stdout,
-        )
-        return _CONCIERGE_DEFAULT_MODEL
-    return base
-
-
 # ---------------------------------------------------------------------------
 # Agent construction
 # ---------------------------------------------------------------------------
@@ -329,11 +285,10 @@ def build_concierge(
         name="WebSearch Agent",
         description=concierge_desc,
         llm=DeepseekChatModel(
-            model_id=_concierge_llm_model_id(),
+            #model_id=os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash"),
+            model_id=os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"),
             base_url="https://api.deepseek.com",
-            allow_parallel_tool_calls=False,
-            ignore_parallel_tool_calls=True,
-            settings=_concierge_litellm_settings(),
+            allow_parallel_tool_calls=True,
         ),
 
         tools=[ThinkTool(), *handoff_tools],

@@ -1,138 +1,312 @@
-# A2A_Web-Search_Red-Hat-KCS
-# Building a Research Concierge: Web Search, Red Hat KCS, and Agent-to-Agent Protocol
+# A2A Research Concierge
 
-Research assistants often need two very different kinds of truth: the open web, where answers are broad and fast-moving, and vendor-official knowledge bases, where support articles and product-specific guidance live behind authenticated APIs. This project combines both behind a single orchestrator, uses **DeepSeek** for reasoning, and exposes everything through **Agent-to-Agent (A2A)** so components can run as separate services and be composed or replaced independently.
-
----
-
-## What the application does
-
-At a high level, users ask natural-language questions. A **concierge** agent decides whether to consult:
-
-1. **General web search** — DuckDuckGo-backed search, synthesized into an answer with URLs.
-2. **Red Hat official knowledge** — search against Red Hat’s **KCS** (Knowledge-Centered Support) catalog via the Access Red Hat **V2 search API**, again synthesized with citations.
-
-Routing is **topic-aware**: questions that are primarily about Red Hat (RHEL, OpenShift, Satellite, subscriptions, support cases, and similar) should prefer the KCS path first; everything else should prefer the open web first. The second specialist is available when the first pass is not enough.
+A multi-agent research assistant that routes questions to either a general web search agent or the Red Hat official knowledge base (KCS), then synthesises a single answer. Built with [BeeAI Framework](https://github.com/i-am-bee/beeai-framework), the [A2A SDK](https://github.com/google/a2a-sdk), and DeepSeek.
 
 ---
 
-## Why multi-agent and A2A?
+## Architecture
 
-Monoliths are easy to ship once and painful to scale or swap. Here, each capability is a **small HTTP service** that speaks the A2A protocol (via the `a2a-sdk` stack and Starlette/Uvicorn for the leaf agents, and BeeAI’s A2A server for the concierge). Benefits:
-
-- **Isolation** — Web search never needs Red Hat credentials; the KCS agent never needs to embed a general crawler.
-- **Independent deployment** — Scale or restart one backend without touching the others.
-- **Clear contracts** — Each agent advertises an **agent card** (name, description, skills). The orchestrator discovers behavior at connection time.
-- **Composability** — The same leaf agents could be wired into a different orchestrator or UI without rewriting their core logic.
-
----
-
-## Architecture in three layers
-
-### 1. Leaf agents (specialists)
-
-**Web search (`web-search-agent-deepseek.py`)**  
-Uses the OpenAI-compatible DeepSeek API with **function calling**. The model invokes a `web_search` tool implemented with `ddgs` (DuckDuckGo). Queries can be **rewritten** first (LangChain + `ChatDeepSeek`) to improve recall. Results are returned as JSON to the model, which then produces a final answer. The process is wrapped in an A2A server so remote clients see a single “agent” endpoint.
-
-**Red Hat KCS (`redhat-kcs-agent-deepseek.py`)**  
-Same pattern: DeepSeek + tool calling, but the tool calls Red Hat’s **KCS V2** POST endpoint (`search_v2_kcs` in `kcsv2.py`). Authentication uses an **offline token** exchanged for a short-lived bearer token (`get_red_hat_access_token`). API responses are normalized into compact JSON (titles, URLs, summaries, products) so the model can cite official articles without dumping raw HTML.
-
-### 2. Orchestrator (concierge)
-
-**`web_util.build_concierge`** constructs a BeeAI **`RequirementAgent`** backed by **`DeepseekChatModel`**. It does not embed search logic; it connects to the two leaf agents as **`A2AAgent`** instances at configurable host/port pairs and exposes them as **`HandoffTool`** targets.
-
-The concierge also gets:
-
-- A **`ThinkTool`** step, forced early in the run, to encourage deliberate routing.
-- **Conditional requirements** so a final answer is only produced after a handoff has occurred—forcing the model to actually delegate to a specialist rather than hallucinate from memory.
-- **Custom instructions** and **tool descriptions** that spell out Red Hat–first vs. web-first priority.
-
-Handoff tool descriptions augment each sub-agent’s card with explicit **PRIORITY** hints so the model’s routing aligns with product intent.
-
-### 3. Entry points and clients
-
-**`a2a_web_server.py`** loads environment variables, builds the concierge, and serves it with BeeAI’s **`A2AServer`** (JSON-RPC over HTTP). Defaults: web search on port `8080`, Red Hat KCS on `8081`, concierge on `9996` (all overridable via flags or env vars such as `WEB_SEARCH_AGENT_PORT`, `REDHAT_KCS_AGENT_PORT`, `Concierge_AGENT_PORT`).
-
-**`a2a_web_client.py`** and **`web_UI.py`** (Flask) are examples of clients that send user prompts to the concierge—useful for demos and manual testing.
-
----
-
-## End-to-end flow
-
-1. User submits a prompt to the concierge (e.g. port `9996`).
-2. Concierge runs **Think**, then chooses **handoff** to `WebSearchAgent-DeepSeek` or `RedHatKCSAgent-DeepSeek` based on instructions and tool text.
-3. The selected leaf agent runs its tool loop (web or KCS), returns text to the concierge.
-4. Concierge synthesizes a final answer, ideally naming which agent supplied the material and preserving URLs.
-
----
-
-## Running it (typical layout)
-
-You need API keys in the environment (e.g. **`DEEPSEEK_API_KEY`**; for KCS, **`REDHAT_OFFLINE_TOKEN`**). Then start three processes:
-
-1. `web-search-agent-deepseek.py` — e.g. port **8080**
-2. `redhat-kcs-agent-deepseek.py` — e.g. port **8081**
-3. `a2a_web_server.py` — concierge on **9996**, pointing at the two ports above
-
-A UI or client then targets the concierge port, not the leaf ports directly.
-
----
-
-## Design tradeoffs
-
-- **Routing is LLM-guided**, not a separate classifier. That keeps the stack simple but means edge cases (e.g. “Ansible” without “Red Hat”) depend on model judgment; tightening behavior can mean richer instructions or a lightweight pre-router later.
-- **KCS vs. docs.redhat.com** — This stack targets **support/KCS-style** articles via the Access API. Product manuals on `docs.redhat.com` are a different surface if you need them later.
-- **Operational surface** — Three long-running services plus keys are more moving parts than a single script; the tradeoff is clarity and replaceability of each piece.
-
----
-
-## Demo (screenshots)
-
-The following walkthrough matches the **shot list** in [`demo/README.md`](demo/README.md). Save PNG files under `demo/screenshots/` with these names so the figures below display in Git hosting or local Markdown preview.
-
-**Runtime topology** (for orientation):
-
-```mermaid
-flowchart LR
-  User[User / UI / CLI]
-  Concierge[Concierge A2A :9996]
-  Web[WebSearchAgent :8080]
-  KCS[RedHatKCSAgent :8081]
-  DDG[DuckDuckGo]
-  API[Red Hat KCS API]
-  User --> Concierge
-  Concierge -->|handoff| Web
-  Concierge -->|handoff| KCS
-  Web --> DDG
-  KCS --> API
+```
+Browser
+  │
+  ▼
+web_UI.py  (Flask, port 5002)
+  │  SSE status stream
+  ▼
+a2a_web_interface.py  (A2A client)
+  │
+  ▼
+a2a_web_server.py  ←  web_util.py
+  (Concierge, port 9996)
+  │ BeeAI RequirementAgent
+  ├──────────────────────────────────┐
+  ▼                                  ▼
+web-search-agent-deepseek.py    redhat-kcs-agent-deepseek.py
+  (port 8080)                     (port 8081)
+  DuckDuckGo search               Red Hat KCS V2 API
 ```
 
-1. **Stack running** — three services: web search leaf, Red Hat KCS leaf, concierge orchestrator.
-
-   ![Three terminals: web agent, KCS agent, concierge](demo/screenshots/01-three-terminals.png)
-
-2. **Concierge discovers both specialists** — startup output listing `WebSearchAgent-DeepSeek` and `RedHatKCSAgent-DeepSeek`.
-
-   ![Concierge startup showing sub-agent connections](demo/screenshots/02-concierge-handoffs.png)
-
-3. **General web path** — Flask chat UI (`web_UI.py`) with a non–Red Hat question; answer should emphasize open-web sources.
-
-   ![Web UI: general question and web-backed answer](demo/screenshots/03-web-ui-general.png)
-
-4. **Red Hat–first path** — same UI with a Red Hat product or support question; answer should emphasize KCS / Access Red Hat article links.
-
-   ![Web UI: Red Hat question and KCS-backed answer](demo/screenshots/04-web-ui-redhat.png)
-
-5. **CLI client** — `a2a_web_client.py` (or equivalent) sending a prompt to the concierge port.
-
-   ![Terminal: A2A client prompt and response](demo/screenshots/05-cli-client.png)
-
-6. **Optional: KCS leaf detail** — Red Hat agent log line showing query enhancement (no secrets in frame).
-
-   ![Optional: Red Hat KCS agent log snippet](demo/screenshots/06-optional-kcs-agent-logs.png)
+All components write structured logs through `concierge_logger.py` to `logs/YYYY-MM-DD/concierge.jsonl`.
 
 ---
 
-## Closing
+## Files
 
-This application is a concrete pattern for **specialist agents behind a policy-aware concierge**: open web for breadth, authenticated vendor search for depth, **A2A** for boundaries, and **DeepSeek** for both execution and routing. If you are building similar systems, the most portable ideas are the separation of leaf agents, the use of agent cards and handoffs for discovery, and explicit priority rules in the orchestrator’s instructions so behavior stays predictable as you add more backends.
+| File | Role |
+|---|---|
+| `web_UI.py` | Flask web UI with real-time SSE status streaming |
+| `a2a_web_interface.py` | A2A client; connects to concierge, surfaces errors, streams status callbacks |
+| `a2a_web_server.py` | A2A server wrapping the BeeAI concierge orchestrator |
+| `web_util.py` | Concierge agent construction: routing logic, handoff tools, BeeAI wiring |
+| `web-search-agent-deepseek.py` | Leaf agent: DuckDuckGo web search via DeepSeek tool calling |
+| `redhat-kcs-agent-deepseek.py` | Leaf agent: Red Hat KCS V2 API search via DeepSeek tool calling |
+| `kcsv2.py` | Red Hat KCS V2 API client (token refresh, search, result formatting) |
+| `a2a_web_client.py` | Standalone CLI client for testing the concierge A2A endpoint |
+| `concierge_logger.py` | Shared structured JSONL logger + CLI analysis tool |
+
+---
+
+## Prerequisites
+
+- Python 3.11+
+- [`uv`](https://github.com/astral-sh/uv) (recommended) or `pip`
+- A [DeepSeek API key](https://platform.deepseek.com/)
+- A Red Hat offline token (only needed for the KCS agent) — obtain from [https://access.redhat.com/management/api](https://access.redhat.com/management/api)
+
+### Install dependencies
+
+```bash
+uv pip install \
+  flask \
+  httpx \
+  python-dotenv \
+  openai \
+  langchain-core \
+  langchain-deepseek \
+  ddgs \
+  uvicorn \
+  a2a-sdk \
+  beeai-framework \
+  requests
+```
+
+---
+
+## Configuration
+
+Create a `.env` file in the project root:
+
+```dotenv
+# Required for all agents
+DEEPSEEK_API_KEY=sk-...
+
+# Required only for the Red Hat KCS agent
+REDHAT_OFFLINE_TOKEN=eyJ...
+
+# Optional overrides (defaults shown)
+DEEPSEEK_MODEL=deepseek-v4-flash          # model used by leaf agents
+CONCIERGE_DEEPSEEK_MODEL=deepseek-v4-pro  # model used by concierge orchestrator
+CONCIERGE_DEEPSEEK_THINKING=disabled      # enabled/disabled (thinking mode for concierge)
+
+# Port configuration
+WEB_SEARCH_AGENT_PORT=8080
+REDHAT_KCS_AGENT_PORT=8081
+Concierge_AGENT_PORT=9996
+AGENT_HOST=localhost
+
+# Logging
+CONCIERGE_LOG_DIR=logs    # base directory for JSONL log files
+
+# Web UI
+UI_HOST=0.0.0.0
+UI_PORT=5002
+FLASK_DEBUG=false
+```
+
+> **Note:** `deepseek-reasoner` is not supported for the concierge orchestrator (it conflicts with forced `tool_choice`). Use `deepseek-v4-flash` or `deepseek-v4-pro` for the concierge.
+
+---
+
+## Running
+
+Start each component in a separate terminal, in this order:
+
+### 1. Web Search Agent
+
+```bash
+python web-search-agent-deepseek.py
+# or with explicit options:
+python web-search-agent-deepseek.py --port 8080 --host localhost
+```
+
+### 2. Red Hat KCS Agent
+
+```bash
+python redhat-kcs-agent-deepseek.py
+# or:
+python redhat-kcs-agent-deepseek.py --port 8081 --host localhost
+```
+
+> The KCS agent can be omitted if you only need general web search. The concierge will detect it is unreachable and fall back to web search only.
+
+### 3. Concierge A2A Server
+
+```bash
+python a2a_web_server.py -v
+# or with explicit ports:
+python a2a_web_server.py --concierge-port 9996 --web-search-port 8080 --redhat-kcs-port 8081 -v
+```
+
+The `-v` flag prints BeeAI trajectory events (Think → HandOff → FinalAnswer steps) to the terminal, which is useful for debugging routing decisions.
+
+To require both leaf agents to be reachable (fail fast if either is down):
+
+```bash
+python a2a_web_server.py --require-all-agents
+```
+
+### 4. Web UI
+
+```bash
+uv run web_UI.py
+# or:
+python web_UI.py
+```
+
+Open [http://localhost:5002](http://localhost:5002) in your browser.
+
+---
+
+## CLI Client (no browser)
+
+Send a prompt directly to the concierge and print the response:
+
+```bash
+python a2a_web_client.py --prompt "RHEL 9 firewalld zone configuration"
+python a2a_web_client.py --prompt "OpenShift ImagePullBackOff error" --port 9996
+```
+
+---
+
+## Routing Logic
+
+The concierge (`web_util.py`) routes based on topic:
+
+| Query topic | Routed to first |
+|---|---|
+| Red Hat products (RHEL, OpenShift, Satellite, AAP, RHSM, KCS) | `redhat-kcs-agent-deepseek.py` |
+| All other topics (general news, other vendors, science, etc.) | `web-search-agent-deepseek.py` |
+
+If the first agent's results are insufficient, the concierge may call the second agent. Each agent can be called at most **twice** per query (controlled by the handoff budget in `web_util.py`).
+
+### Query enhancement
+
+Both leaf agents rewrite the user's raw query with a second LLM call before searching. This expands abbreviations, adds synonyms, and adds product/version context. The original and enhanced queries are both captured in the logs.
+
+---
+
+## Logging
+
+All components write to a single rotating JSONL file:
+
+```
+logs/
+└── YYYY-MM-DD/
+    └── concierge.jsonl   # one JSON object per line
+```
+
+Every log record contains at minimum:
+
+| Field | Description |
+|---|---|
+| `ts` | ISO-8601 UTC timestamp |
+| `session` | 12-character hex ID tying all records for one query together |
+| `agent` | Which component wrote the record (`web_ui`, `web_search_agent`, `kcs_agent`, `a2a_interface`, `concierge`) |
+| `event` | What happened (see event types below) |
+
+### Event types
+
+| Event | Agent | Key extra fields |
+|---|---|---|
+| `query_received` | web_ui | `prompt`, `source_ip` |
+| `query_complete` | web_ui | `prompt`, `answer`, `elapsed_sec`, `answer_len` |
+| `query_error` | web_ui | `prompt`, `error_msg`, `error_type`, `elapsed_sec` |
+| `web_query_raw` | web_search_agent | `prompt` |
+| `web_query_enhanced` | web_search_agent | `raw`, `enhanced` |
+| `web_search_call` | web_search_agent | `query`, `round_num` |
+| `web_search_result` | web_search_agent | `query`, `round_num`, `num_results`, `results[]` (title, url, snippet) |
+| `web_answer` | web_search_agent | `raw_query`, `enhanced_query`, `answer`, `rounds_used` |
+| `kcs_query_raw` | kcs_agent | `prompt` |
+| `kcs_query_enhanced` | kcs_agent | `raw`, `enhanced` |
+| `kcs_search_call` | kcs_agent | `query`, `num_results`, `round_num` |
+| `kcs_search_result` | kcs_agent | `query`, `round_num`, `total_found`, `num_returned`, `articles[]` (id, title, url, products, summary) |
+| `kcs_answer` | kcs_agent | `raw_query`, `enhanced_query`, `answer`, `rounds_used` |
+| `concierge_answer` | concierge | `answer`, `answer_len`, `elapsed_sec` |
+| `status_update` | a2a_interface | `message` |
+
+### Log analysis CLI
+
+`concierge_logger.py` can be run directly for log analysis:
+
+```bash
+# Live tail of the current day's log
+python concierge_logger.py tail
+
+# Per-session summary table: query, status, elapsed time, URL count
+python concierge_logger.py summary logs/2025-01-15/concierge.jsonl
+
+# Full drill-down on one session (all events in order)
+python concierge_logger.py session abc123def456 logs/2025-01-15/concierge.jsonl
+```
+
+### Diagnosing poor synthesis quality
+
+The logs are structured to answer specific questions about why an answer was poor:
+
+| Symptom | What to check in the log |
+|---|---|
+| Answer is irrelevant to the query | Compare `web_query_raw` vs `web_query_enhanced` — the rewriter may have changed the intent |
+| Answer ignores the best URLs | Check `web_search_result.results[].url` — were the right pages actually returned? |
+| URLs were good but answer is thin | The synthesis prompt is the problem; the raw material was available but not used well |
+| `rounds_used: 1` on a complex query | The agent stopped searching too quickly |
+| KCS answer is weak | Check `kcs_search_result.total_found` vs `num_returned` — it may be working with too few articles |
+| Concierge answer is shorter than leaf answer | The orchestrator truncated or discarded the leaf's output; compare `kcs_answer.answer` vs `concierge_answer.answer` |
+| `query_error` with max-iteration detail | The concierge ran out of steps; try a more specific or shorter query |
+
+### Example: grep for all URLs seen in a session
+
+```bash
+# All URLs returned by web search for session abc123
+grep '"session": "abc123"' logs/2025-01-15/concierge.jsonl \
+  | python -c "
+import sys, json
+for line in sys.stdin:
+    r = json.loads(line)
+    for res in r.get('results', []) + r.get('articles', []):
+        u = res.get('url') or res.get('href', '')
+        if u: print(u)
+"
+```
+
+---
+
+## Troubleshooting
+
+**Concierge fails to start with "No sub-agents are reachable"**
+At least one leaf agent must be running before starting `a2a_web_server.py`. Start `web-search-agent-deepseek.py` first.
+
+**KCS agent returns 401 errors**
+Your `REDHAT_OFFLINE_TOKEN` has expired or is invalid. Generate a new one at [https://access.redhat.com/management/api](https://access.redhat.com/management/api).
+
+**Web UI shows a blank response**
+Check the concierge terminal for `AgentError` or max-iteration messages. The UI now shows a descriptive error message for these cases. If the bubble is still blank, check that `a2a_web_server.py` is running on port 9996.
+
+**`deepseek-reasoner does not support this tool_choice` error**
+Set `CONCIERGE_DEEPSEEK_MODEL=deepseek-v4-pro` or `deepseek-v4-flash` in your `.env`. The `deepseek-reasoner` model is incompatible with the concierge's tool-calling orchestration.
+
+**Very slow responses**
+The concierge can make up to 12 reasoning steps (`MAX_ITERATIONS` in `web_util.py`), each of which may call a leaf agent that in turn makes multiple LLM calls. For faster responses, reduce `MAX_ITERATIONS` or `MAX_TOOL_ROUNDS` in the leaf agents (default: 5).
+
+---
+
+## Development Notes
+
+### Adding a new leaf agent
+
+1. Create a new A2A agent following the pattern in `web-search-agent-deepseek.py`.
+2. Add `import concierge_logger as clog` and instrument it with the appropriate `clog.log_*` calls.
+3. In `web_util.py`, add a new `_init_sub_agent()` call in `build_concierge()` and add a corresponding `HandoffTool` with routing instructions.
+4. Add the new port to `a2a_web_server.py` CLI args and `.env`.
+
+### Changing the concierge model
+
+```dotenv
+CONCIERGE_DEEPSEEK_MODEL=deepseek-v4-flash   # faster, cheaper
+CONCIERGE_DEEPSEEK_MODEL=deepseek-v4-pro     # default, better reasoning
+```
+
+Do not use `deepseek-reasoner` for the concierge (tool-choice incompatibility).
+
+### Log rotation
+
+Logs rotate at 50 MB per file with 14 backups kept (`concierge_logger.py`, `_build_handler()`). Daily directories are created automatically. Old directories are not auto-deleted; prune them manually or with a cron job if disk space is a concern.

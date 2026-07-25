@@ -21,7 +21,6 @@ import json
 import os
 
 import uvicorn
-import concierge_logger as clog
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.apps import A2AStarletteApplication
 from a2a.server.events import EventQueue
@@ -64,7 +63,7 @@ SEARCH_TOOL = {
 MAX_TOOL_ROUNDS = 5
 
 
-def web_search(query: str, max_results: int = 5, *, session: str = "", round_num: int = 0) -> str:
+def web_search(query: str, max_results: int = 5) -> str:
     """Run a DuckDuckGo search and return results as JSON.
 
     Returns an empty list JSON and a notice when DuckDuckGo finds no results,
@@ -73,13 +72,9 @@ def web_search(query: str, max_results: int = 5, *, session: str = "", round_num
     try:
         with DDGS() as ddgs:
             results = list(ddgs.text(query, max_results=max_results))
-        if session:
-            clog.log_web_search_result(session, query, results, round_num)
         return json.dumps(results, ensure_ascii=False)
     except DDGSException as exc:
-        print(f"DDGS search failed for \'{query}\': {exc}")
-        if session:
-            clog.log_web_search_result(session, query, [], round_num)
+        print(f"DDGS search failed for '{query}': {exc}")
         return json.dumps(
             {"error": str(exc), "query": query, "results": []},
             ensure_ascii=False,
@@ -95,10 +90,10 @@ class WebSearchAgent:
             api_key=os.environ["DEEPSEEK_API_KEY"],
             base_url="https://api.deepseek.com",
         )
-        self.model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
+        self.model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 
         self.llm = ChatDeepSeek(
-            model=self.model,
+            model="deepseek-chat",
             temperature=0,
             max_tokens=None,
             timeout=None,
@@ -134,13 +129,8 @@ class WebSearchAgent:
         return result.content
 
 
-    def answer_query(self, prompt: str, *, session: str = "") -> str:
-        session = session or clog.new_session()
-        clog.log(clog.EV_WEB_QUERY_RAW, "web_search_agent", session, prompt=prompt)
-
+    def answer_query(self, prompt: str) -> str:
         enhanced_query = self._enhance_query(prompt)
-        clog.log(clog.EV_WEB_QUERY_ENHANCED, "web_search_agent", session,
-                 raw=prompt, enhanced=enhanced_query)
         print(f"{'--' * 40}\nEnhanced Query:\n{enhanced_query}\n{'--' * 40}")
 
         messages = [
@@ -148,36 +138,26 @@ class WebSearchAgent:
             {"role": "user", "content": enhanced_query},
         ]
 
-        round_num = 0
         for _ in range(MAX_TOOL_ROUNDS):
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 tools=[SEARCH_TOOL],
                 tool_choice="auto",
-                extra_body={"thinking": {"type": "enabled"}}
             )
             choice = response.choices[0]
 
             if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
                 messages.append(choice.message)
                 for call in choice.message.tool_calls:
-                    round_num += 1
-                    q = json.loads(call.function.arguments)["query"]
-                    clog.log_web_search_call(session, q, round_num,
-                                             raw_query=prompt, enhanced_query=enhanced_query)
-                    result = web_search(q, session=session, round_num=round_num)
+                    result = web_search(json.loads(call.function.arguments)["query"])
                     messages.append(
                         {"role": "tool", "tool_call_id": call.id, "content": result}
                     )
             else:
-                answer = choice.message.content or ""
-                clog.log_web_answer(session, prompt, enhanced_query, answer, round_num)
-                return answer
+                return choice.message.content or ""
 
-        answer = messages[-1].get("content", "") if isinstance(messages[-1], dict) else ""
-        clog.log_web_answer(session, prompt, enhanced_query, answer, round_num)
-        return answer
+        return messages[-1].get("content", "") if isinstance(messages[-1], dict) else ""
 
 
 class WebSearchAgentExecutor(AgentExecutor):
@@ -188,9 +168,7 @@ class WebSearchAgentExecutor(AgentExecutor):
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         prompt = context.get_user_input()
-        # Try to reuse a session ID passed in task metadata; otherwise create one
-        session = clog.new_session()
-        response = self.agent.answer_query(prompt, session=session)
+        response = self.agent.answer_query(prompt)
         await event_queue.enqueue_event(new_agent_text_message(response))
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:

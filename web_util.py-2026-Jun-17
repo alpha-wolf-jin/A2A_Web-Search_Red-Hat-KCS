@@ -48,7 +48,7 @@ from beeai_framework.tools.think import ThinkTool
 from dotenv import load_dotenv
 
 
-MAX_ITERATIONS = 12
+MAX_ITERATIONS = 36
 
 
 class ConfiguredRequirementAgent(RequirementAgent):
@@ -331,8 +331,7 @@ def build_concierge(
         llm=DeepseekChatModel(
             model_id=_concierge_llm_model_id(),
             base_url="https://api.deepseek.com",
-            allow_parallel_tool_calls=False,
-            ignore_parallel_tool_calls=True,
+            allow_parallel_tool_calls=True,
             settings=_concierge_litellm_settings(),
         ),
 

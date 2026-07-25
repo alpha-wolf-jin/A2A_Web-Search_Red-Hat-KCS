@@ -23,7 +23,6 @@ import os
 import time
 
 import uvicorn
-import concierge_logger as clog
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.apps import A2AStarletteApplication
 from a2a.server.events import EventQueue
@@ -125,12 +124,12 @@ class RedHatKCSAgent:
             api_key=os.environ["DEEPSEEK_API_KEY"],
             base_url="https://api.deepseek.com",
         )
-        self.model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
+        self.model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
         self._access_token: str | None = None
         self._token_at: float = 0.0
 
         self.llm = ChatDeepSeek(
-            model=self.model,
+            model="deepseek-chat",
             temperature=0,
             max_tokens=None,
             timeout=None,
@@ -155,26 +154,14 @@ class RedHatKCSAgent:
             self._token_at = now
         return self._access_token
 
-    def _kcs_search(self, query: str, num_results: int = 10,
-                    *, session: str = "", round_num: int = 0) -> str:
+    def _kcs_search(self, query: str, num_results: int = 10) -> str:
         num_results = max(1, min(int(num_results), 20))
-        if session:
-            clog.log_kcs_search_call(session, query, num_results, round_num)
         token = self._ensure_token()
         raw = search_v2_kcs(token, query, num_results)
         if isinstance(raw, str) and "401" in raw:
             self._access_token = None
             token = self._ensure_token()
             raw = search_v2_kcs(token, query, num_results)
-        # Log the articles returned
-        if session and isinstance(raw, dict):
-            resp = raw.get("response", {})
-            articles = [_doc_to_entry(d) for d in resp.get("docs", [])]
-            clog.log_kcs_search_result(
-                session, query, round_num,
-                total_found=resp.get("numFound", 0),
-                articles=articles,
-            )
         return format_kcs_results_for_llm(raw)
 
     def _enhance_query(self, query: str) -> str:
@@ -183,13 +170,8 @@ class RedHatKCSAgent:
         )
         return result.content
 
-    def answer_query(self, prompt: str, *, session: str = "") -> str:
-        session = session or clog.new_session()
-        clog.log(clog.EV_KCS_QUERY_RAW, "kcs_agent", session, prompt=prompt)
-
+    def answer_query(self, prompt: str) -> str:
         enhanced_query = self._enhance_query(prompt)
-        clog.log(clog.EV_KCS_QUERY_ENHANCED, "kcs_agent", session,
-                 raw=prompt, enhanced=enhanced_query)
         print(f"{'--' * 40}\nEnhanced KCS query:\n{enhanced_query}\n{'--' * 40}")
 
         messages = [
@@ -197,37 +179,29 @@ class RedHatKCSAgent:
             {"role": "user", "content": enhanced_query},
         ]
 
-        round_num = 0
         for _ in range(MAX_TOOL_ROUNDS):
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 tools=[KCS_TOOL],
                 tool_choice="auto",
-                extra_body={"thinking": {"type": "enabled"}}
             )
             choice = response.choices[0]
 
             if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
                 messages.append(choice.message)
                 for call in choice.message.tool_calls:
-                    round_num += 1
                     args = json.loads(call.function.arguments)
                     q = args["query"]
                     n = args.get("num_results", 10)
-                    result = self._kcs_search(q, num_results=n,
-                                              session=session, round_num=round_num)
+                    result = self._kcs_search(q, num_results=n)
                     messages.append(
                         {"role": "tool", "tool_call_id": call.id, "content": result}
                     )
             else:
-                answer = choice.message.content or ""
-                clog.log_kcs_answer(session, prompt, enhanced_query, answer, round_num)
-                return answer
+                return choice.message.content or ""
 
-        answer = messages[-1].get("content", "") if isinstance(messages[-1], dict) else ""
-        clog.log_kcs_answer(session, prompt, enhanced_query, answer, round_num)
-        return answer
+        return messages[-1].get("content", "") if isinstance(messages[-1], dict) else ""
 
 
 class RedHatKCSAgentExecutor(AgentExecutor):
@@ -236,8 +210,7 @@ class RedHatKCSAgentExecutor(AgentExecutor):
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         prompt = context.get_user_input()
-        session = clog.new_session()
-        response = self.agent.answer_query(prompt, session=session)
+        response = self.agent.answer_query(prompt)
         await event_queue.enqueue_event(new_agent_text_message(response))
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
