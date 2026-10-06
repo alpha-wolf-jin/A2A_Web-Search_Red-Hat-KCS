@@ -44,7 +44,6 @@ from beeai_framework.memory import UnconstrainedMemory
 from beeai_framework.middleware.trajectory import EventMeta, GlobalTrajectoryMiddleware
 from beeai_framework.serve.utils import LRUMemoryManager
 from beeai_framework.tools.handoff import HandoffTool
-from beeai_framework.tools.think import ThinkTool
 from dotenv import load_dotenv
 
 
@@ -122,8 +121,8 @@ class ConciseTrajectoryMiddleware(GlobalTrajectoryMiddleware):
 # ``CONCIERGE_DEEPSEEK_THINKING=disabled`` (default). Set to ``enabled`` to experiment
 # (expect failures while tools + forced tool_choice are in use).
 _CONCIERGE_INCOMPATIBLE_MODELS = frozenset({"deepseek-reasoner"})
-#_CONCIERGE_DEFAULT_MODEL = "deepseek-v4-flash"
-_CONCIERGE_DEFAULT_MODEL = "deepseek-v4-pro"
+_CONCIERGE_DEFAULT_MODEL = "deepseek-v4-flash"
+#_CONCIERGE_DEFAULT_MODEL = "deepseek-v4-pro"
 
 
 def _concierge_litellm_settings() -> dict[str, Any]:
@@ -336,9 +335,8 @@ def build_concierge(
             settings=_concierge_litellm_settings(),
         ),
 
-        tools=[ThinkTool(), *handoff_tools],
+        tools=[*handoff_tools],
         requirements=[
-            CloneSafeConditionalRequirement(ThinkTool, force_at_step=1),
             CloneSafeConditionalRequirement(
                 "final_answer",
                 only_after=HandoffTool,

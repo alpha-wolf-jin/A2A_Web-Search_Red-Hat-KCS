@@ -41,9 +41,11 @@ from kcsv2 import get_red_hat_access_token, search_v2_kcs, strip_html
 SYSTEM_PROMPT = """\
 You are a helpful assistant for Red Hat products and support content. When the
 user asks a question, use the red_hat_kcs_search tool to find relevant official
-Red Hat knowledge base articles and documentation. You may call the tool
-multiple times with different queries. Synthesize findings into a clear answer
-and cite each source with its title and URL."""
+Red Hat knowledge base articles and documentation. Call the tool at most 3
+times, using a different query only when the previous result is clearly
+insufficient. Once you have enough information — or after 3 searches — stop
+searching and synthesize findings into a clear answer and cite each source with
+its title and URL."""
 
 KCS_TOOL = {
     "type": "function",
@@ -115,6 +117,23 @@ def format_kcs_results_for_llm(raw: object) -> str:
     )
 
 
+def _leaf_thinking_body(env_var: str, default: str = "disabled") -> dict:
+    """Return the ``extra_body`` thinking toggle for DeepSeek V4 leaf agents.
+
+    Reads *env_var* from the environment.  Any truthy value (``enabled``,
+    ``1``, ``true``, ``yes``, ``on``) enables thinking; everything else
+    (including the default ``disabled``) turns it off.
+
+    .. warning::
+        Enabling thinking on a tool-calling leaf agent causes the model to
+        emit parallel tool calls (inflating search rounds 3-4×) and greatly
+        increases context size.  Keep this ``disabled`` unless experimenting.
+    """
+    mode = (os.environ.get(env_var, default) or default).strip().lower()
+    t = "enabled" if mode in ("1", "true", "on", "yes", "enabled") else "disabled"
+    return {"thinking": {"type": t}}
+
+
 class RedHatKCSAgent:
     """Agent that searches Red Hat KCS via DeepSeek tool calling."""
 
@@ -125,6 +144,8 @@ class RedHatKCSAgent:
             api_key=os.environ["DEEPSEEK_API_KEY"],
             base_url="https://api.deepseek.com",
         )
+        # Thinking mode: env var KCS_DEEPSEEK_THINKING (default: disabled)
+        self._thinking_extra = _leaf_thinking_body("KCS_DEEPSEEK_THINKING")
         self.model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
         self._access_token: str | None = None
         self._token_at: float = 0.0
@@ -204,7 +225,8 @@ class RedHatKCSAgent:
                 messages=messages,
                 tools=[KCS_TOOL],
                 tool_choice="auto",
-                extra_body={"thinking": {"type": "enabled"}}
+                parallel_tool_calls=False,
+                extra_body=self._thinking_extra,
             )
             choice = response.choices[0]
 
@@ -225,7 +247,14 @@ class RedHatKCSAgent:
                 clog.log_kcs_answer(session, prompt, enhanced_query, answer, round_num)
                 return answer
 
-        answer = messages[-1].get("content", "") if isinstance(messages[-1], dict) else ""
+        # MAX_TOOL_ROUNDS exhausted — force one final synthesis call with no tools
+        # so the model must write a prose answer instead of returning raw search JSON.
+        synth = self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            extra_body=self._thinking_extra,
+        )
+        answer = synth.choices[0].message.content or ""
         clog.log_kcs_answer(session, prompt, enhanced_query, answer, round_num)
         return answer
 

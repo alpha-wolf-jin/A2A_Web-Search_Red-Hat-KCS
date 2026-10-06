@@ -38,10 +38,11 @@ from langchain_deepseek import ChatDeepSeek
 
 SYSTEM_PROMPT = """\
 You are a helpful web research agent. When the user asks a question, use the
-web_search tool to find relevant, up-to-date information on the web. You may
-call the tool multiple times with different queries to gather comprehensive
-results. Synthesize the findings into a clear, well-organized answer and
-cite your sources with URLs."""
+web_search tool to find relevant, up-to-date information on the web. Call the
+tool at most 3 times, using different queries only when the first result is
+clearly insufficient. Once you have enough information — or after 3 searches —
+stop searching and synthesize the findings into a clear, well-organized answer
+and cite your sources with URLs."""
 
 SEARCH_TOOL = {
     "type": "function",
@@ -86,6 +87,23 @@ def web_search(query: str, max_results: int = 5, *, session: str = "", round_num
         )
 
 
+def _leaf_thinking_body(env_var: str, default: str = "disabled") -> dict:
+    """Return the ``extra_body`` thinking toggle for DeepSeek V4 leaf agents.
+
+    Reads *env_var* from the environment.  Any truthy value (``enabled``,
+    ``1``, ``true``, ``yes``, ``on``) enables thinking; everything else
+    (including the default ``disabled``) turns it off.
+
+    .. warning::
+        Enabling thinking on a tool-calling leaf agent causes the model to
+        emit parallel tool calls (inflating search rounds 3-4×) and greatly
+        increases context size.  Keep this ``disabled`` unless experimenting.
+    """
+    mode = (os.environ.get(env_var, default) or default).strip().lower()
+    t = "enabled" if mode in ("1", "true", "on", "yes", "enabled") else "disabled"
+    return {"thinking": {"type": t}}
+
+
 class WebSearchAgent:
     """General-purpose web search agent powered by DeepSeek."""
 
@@ -95,6 +113,8 @@ class WebSearchAgent:
             api_key=os.environ["DEEPSEEK_API_KEY"],
             base_url="https://api.deepseek.com",
         )
+        # Thinking mode: env var WEB_SEARCH_DEEPSEEK_THINKING (default: disabled)
+        self._thinking_extra = _leaf_thinking_body("WEB_SEARCH_DEEPSEEK_THINKING")
         self.model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
 
         self.llm = ChatDeepSeek(
@@ -155,7 +175,8 @@ class WebSearchAgent:
                 messages=messages,
                 tools=[SEARCH_TOOL],
                 tool_choice="auto",
-                extra_body={"thinking": {"type": "enabled"}}
+                parallel_tool_calls=False,
+                extra_body=self._thinking_extra,
             )
             choice = response.choices[0]
 
@@ -175,7 +196,14 @@ class WebSearchAgent:
                 clog.log_web_answer(session, prompt, enhanced_query, answer, round_num)
                 return answer
 
-        answer = messages[-1].get("content", "") if isinstance(messages[-1], dict) else ""
+        # MAX_TOOL_ROUNDS exhausted — force one final synthesis call with no tools
+        # so the model must write a prose answer instead of returning raw search JSON.
+        synth = self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            extra_body=self._thinking_extra,
+        )
+        answer = synth.choices[0].message.content or ""
         clog.log_web_answer(session, prompt, enhanced_query, answer, round_num)
         return answer
 
